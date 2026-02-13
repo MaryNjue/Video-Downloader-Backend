@@ -36,16 +36,31 @@ class VideoDownloadService {
         }
     }
 
+    // Check if URL needs JavaScript runtime (YouTube)
+    private fun needsJsRuntime(url: String): Boolean {
+        return url.contains("youtube.com") ||
+                url.contains("youtu.be") ||
+                url.contains("youtube-nocookie.com")
+    }
+
     fun extractInfo(url: String): VideoInfoResponse {
         println("🔍 Extracting info: $url")
 
-        val command = listOf(
+        val useJsRuntime = needsJsRuntime(url)
+
+        val command = mutableListOf(
             ytDlpPath,
             "--dump-json",
             "--no-warnings",
-            "--quiet",
-            url
+            "--quiet"
         )
+
+        if (useJsRuntime) {
+            command.add("--js-runtimes")
+            command.add(jsRuntime)
+        }
+
+        command.add(url)
 
         val process = ProcessBuilder(command)
             .redirectErrorStream(true)
@@ -54,8 +69,13 @@ class VideoDownloadService {
         val output = process.inputStream.bufferedReader().readText()
         process.waitFor(2, TimeUnit.MINUTES)
 
+        // Debug: print what we got
+        println("yt-dlp output length: ${output.length}")
+        println("First 200 chars: ${output.take(200)}")
+
         if (!output.trim().startsWith("{")) {
-            throw IllegalStateException("Invalid response from yt-dlp")
+            println("ERROR: Invalid JSON response: $output")
+            throw IllegalStateException("Invalid response from yt-dlp: ${output.take(100)}")
         }
 
         val root = objectMapper.readTree(output)
@@ -70,9 +90,11 @@ class VideoDownloadService {
                 FormatResponse(
                     formatId = it["format_id"]?.asText() ?: "unknown",
                     ext = it["ext"].asText(),
-                    resolution = it["resolution"]?.asText() ?: it["abr"]?.asText()?.let { "${it}kbps" } ?: "unknown",
+                    resolution = it["resolution"]?.asText()
+                        ?: it["abr"]?.asText()?.let { "${it}kbps" }
+                        ?: "unknown",
                     filesize = it["filesize"]?.asLong(),
-                    audioOnly = it["vcodec"]?.asText() == "none" || it["acodec"]?.asText() != "none" && it["vcodec"]?.asText() == "none"
+                    audioOnly = it["vcodec"]?.asText() == "none"
                 )
             } ?: emptyList()
 
@@ -106,9 +128,10 @@ class VideoDownloadService {
         val tempFile = File.createTempFile("audio_", ".$format")
         if (tempFile.exists()) tempFile.delete()
 
-        val command = listOf(
+        val useJsRuntime = needsJsRuntime(url)
+
+        val command = mutableListOf(
             ytDlpPath,
-            "--js-runtimes", jsRuntime,
             "--no-check-certificates",
             "--no-warnings",
             "-x",
@@ -116,9 +139,15 @@ class VideoDownloadService {
             "--audio-quality", "0",
             "-o", tempFile.absolutePath,
             "--force-overwrites",
-            "--newline",
-            url
+            "--newline"
         )
+
+        if (useJsRuntime) {
+            command.add("--js-runtimes")
+            command.add(jsRuntime)
+        }
+
+        command.add(url)
 
         return executeDownload(command, tempFile)
     }
@@ -161,7 +190,7 @@ class VideoDownloadService {
         val tempFile = File.createTempFile("video_", ".$ext")
         if (tempFile.exists()) tempFile.delete()
 
-        val useJsRuntime = url.contains("youtube") || url.contains("youtu.be")
+        val useJsRuntime = needsJsRuntime(url)
 
         val command = mutableListOf(
             ytDlpPath,
