@@ -3,18 +3,18 @@ package com.example.demo.service
 import org.springframework.stereotype.Service
 import java.io.File
 import java.io.IOException
+import java.net.URL
 import java.util.concurrent.TimeUnit
 
 @Service
 class VideoDownloadService {
 
     private val ytDlpPath = "yt-dlp"
-    private val jsRuntime = "node"  // Changed from "/home/mery/.deno/bin/deno"
-    private val timeoutMinutes = 15L
+    private val jsRuntime = "node"
+    private val timeoutMinutes = 5L
 
     init {
         checkYtDlpAvailability()
-        checkJsRuntimeAvailability()
     }
 
     private fun checkYtDlpAvailability() {
@@ -24,82 +24,88 @@ class VideoDownloadService {
                 .start()
 
             val output = process.inputStream.bufferedReader().readText()
-            val exitCode = process.waitFor(10, TimeUnit.SECONDS)
-
-            if (!exitCode || process.exitValue() != 0) {
-                throw IllegalStateException("yt-dlp not found")
-            }
+            process.waitFor(10, TimeUnit.SECONDS)
 
             println("✅ yt-dlp version: ${output.trim()}")
         } catch (e: IOException) {
-            throw IllegalStateException("yt-dlp not found in PATH", e)
-        }
-    }
-
-    private fun checkJsRuntimeAvailability() {
-        try {
-            val process = ProcessBuilder(jsRuntime, "--version")
-                .redirectErrorStream(true)
-                .start()
-
-            val finished = process.waitFor(10, TimeUnit.SECONDS)
-            val output = process.inputStream.bufferedReader().readText()
-
-            if (!finished || process.exitValue() != 0) {
-                throw IllegalStateException("$jsRuntime not found")
-            }
-
-            println("✅ Node.js available: ${output.trim()}")
-        } catch (e: IOException) {
-            throw IllegalStateException("Node.js not found in PATH", e)
+            throw IllegalStateException("yt-dlp not found", e)
         }
     }
 
     fun download(url: String): File {
-        println("📥 Downloading video: $url")
+        println("📥 Downloading: $url")
+
+        // For direct MP4 files, use simple HTTP download
+        if (url.endsWith(".mp4") || url.endsWith(".webm")) {
+            return downloadDirect(url)
+        }
+
+        // For YouTube and other sites, use yt-dlp
+        return downloadWithYtDlp(url)
+    }
+
+    private fun downloadDirect(url: String): File {
+        println("🌐 Direct download: $url")
 
         val tempFile = File.createTempFile("video_", ".mp4")
 
-        val command = listOf(
-            ytDlpPath,
-            "--js-runtimes", jsRuntime,
-            "--no-check-certificates",
-            "--no-warnings",
-            "--no-playlist",
-            "-f", "best[ext=mp4]/best",
-            "-o", tempFile.absolutePath,
-            "--no-overwrites",
-            "--newline",
-            url
-        )
+        try {
+            val connection = URL(url).openConnection()
+            connection.setRequestProperty("User-Agent", "Mozilla/5.0")
+            connection.connectTimeout = 30000
+            connection.readTimeout = 120000
 
-        return executeDownload(command, tempFile, "video")
+            connection.getInputStream().use { input ->
+                tempFile.outputStream().use { output ->
+                    val buffer = ByteArray(8192)
+                    var read: Int
+                    var total: Long = 0
+
+                    while (input.read(buffer).also { read = it } != -1) {
+                        output.write(buffer, 0, read)
+                        total += read
+                        if (total % 1000000 == 0L) println("Downloaded: ${total / 1024}KB")
+                    }
+                }
+            }
+
+            println("✅ Downloaded: ${tempFile.length()} bytes")
+            return tempFile
+
+        } catch (e: Exception) {
+            tempFile.delete()
+            throw e
+        }
     }
 
-    fun downloadAudio(url: String, format: String = "mp3"): File {
-        println("🎵 Downloading audio: $url")
+    private fun downloadWithYtDlp(url: String): File {
+        val tempFile = File.createTempFile("video_", ".mp4")
+        if (tempFile.exists()) tempFile.delete()
 
-        val tempFile = File.createTempFile("audio_", ".$format")
+        val useJsRuntime = url.contains("youtube") || url.contains("youtu.be")
 
-        val command = listOf(
+        val command = mutableListOf(
             ytDlpPath,
-            "--js-runtimes", jsRuntime,
             "--no-check-certificates",
             "--no-warnings",
-            "--no-playlist",
-            "-x",
-            "--audio-format", format,
-            "--audio-quality", "0",
             "-o", tempFile.absolutePath,
-            "--no-overwrites",
-            "--newline",
-            url
+            "--force-overwrites",
+            "--newline"
         )
 
-        return executeDownload(command, tempFile, "audio")
+        if (useJsRuntime) {
+            command.add("--js-runtimes")
+            command.add(jsRuntime)
+            command.add("-f")
+            command.add("best[ext=mp4]/best")
+        }
+
+        command.add(url)
+
+        return executeDownload(command, tempFile)
     }
 
-    private fun executeDownload(command: List<String>, tempFile: File, type: String): File {
+    private fun executeDownload(command: List<String>, tempFile: File): File {
         println("🚀 Command: ${command.joinToString(" ")}")
 
         return try {
@@ -112,7 +118,7 @@ class VideoDownloadService {
 
             reader.useLines { lines ->
                 lines.forEach { line ->
-                    println("yt-dlp: $line")
+                    println("[yt-dlp] $line")
                     output.appendLine(line)
                 }
             }
@@ -122,22 +128,15 @@ class VideoDownloadService {
             if (!finished) {
                 process.destroyForcibly()
                 tempFile.delete()
-                throw IllegalStateException("Download timed out after $timeoutMinutes minutes")
-            }
-
-            val exitCode = process.exitValue()
-
-            if (exitCode != 0) {
-                tempFile.delete()
-                throw IllegalStateException("Download failed (exit $exitCode): ${output.toString()}")
+                throw IllegalStateException("Timeout after $timeoutMinutes minutes")
             }
 
             if (!tempFile.exists() || tempFile.length() == 0L) {
                 tempFile.delete()
-                throw IllegalStateException("Download completed but file is empty")
+                throw IllegalStateException("File empty or missing")
             }
 
-            println("✅ $type downloaded: ${tempFile.length()} bytes")
+            println("✅ Success: ${tempFile.length()} bytes")
             tempFile
 
         } catch (e: Exception) {
