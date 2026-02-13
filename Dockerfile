@@ -13,14 +13,12 @@ RUN apk add --no-cache \
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
     && chmod a+rx /usr/local/bin/yt-dlp
 
-# Install Deno - use direct download instead of install script
-RUN curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip -o /tmp/deno.zip \
+# Install Deno - Alpine Linux needs musl build, not glibc
+RUN curl -fsSL https://github.com/denoland/deno/releases/download/v2.2.2/deno-x86_64-unknown-linux-musl.zip -o /tmp/deno.zip \
     && unzip /tmp/deno.zip -d /usr/local/bin/ \
     && chmod +x /usr/local/bin/deno \
-    && rm /tmp/deno.zip
-
-# Verify installations
-RUN yt-dlp --version && deno --version
+    && rm /tmp/deno.zip \
+    && /usr/local/bin/deno --version
 
 WORKDIR /app
 
