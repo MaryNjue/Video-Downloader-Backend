@@ -1,6 +1,9 @@
 package com.example.demo.service
 
+import com.example.demo.dto.FormatResponse
+import com.example.demo.dto.VideoInfoResponse
 import org.springframework.stereotype.Service
+import tools.jackson.databind.ObjectMapper
 import java.io.File
 import java.io.IOException
 import java.net.URL
@@ -12,6 +15,7 @@ class VideoDownloadService {
     private val ytDlpPath = "yt-dlp"
     private val jsRuntime = "node"
     private val timeoutMinutes = 5L
+    private val objectMapper = ObjectMapper()
 
     init {
         checkYtDlpAvailability()
@@ -32,22 +36,97 @@ class VideoDownloadService {
         }
     }
 
+    fun extractInfo(url: String): VideoInfoResponse {
+        println("🔍 Extracting info: $url")
+
+        val command = listOf(
+            ytDlpPath,
+            "--dump-json",
+            "--no-warnings",
+            "--quiet",
+            url
+        )
+
+        val process = ProcessBuilder(command)
+            .redirectErrorStream(true)
+            .start()
+
+        val output = process.inputStream.bufferedReader().readText()
+        process.waitFor(2, TimeUnit.MINUTES)
+
+        if (!output.trim().startsWith("{")) {
+            throw IllegalStateException("Invalid response from yt-dlp")
+        }
+
+        val root = objectMapper.readTree(output)
+
+        val formats = root["formats"]
+            ?.filter { it["ext"] != null }
+            ?.filter {
+                val ext = it["ext"].asText()
+                ext in listOf("mp4", "mkv", "webm", "m4a", "mp3")
+            }
+            ?.map {
+                FormatResponse(
+                    formatId = it["format_id"]?.asText() ?: "unknown",
+                    ext = it["ext"].asText(),
+                    resolution = it["resolution"]?.asText() ?: it["abr"]?.asText()?.let { "${it}kbps" } ?: "unknown",
+                    filesize = it["filesize"]?.asLong(),
+                    audioOnly = it["vcodec"]?.asText() == "none" || it["acodec"]?.asText() != "none" && it["vcodec"]?.asText() == "none"
+                )
+            } ?: emptyList()
+
+        return VideoInfoResponse(
+            title = root["title"]?.asText() ?: "Unknown Title",
+            duration = root["duration"]?.asInt() ?: 0,
+            thumbnail = root["thumbnail"]?.asText(),
+            formats = formats
+        )
+    }
+
+    fun getFormats(url: String): List<FormatResponse> {
+        return extractInfo(url).formats
+    }
+
     fun download(url: String): File {
-        println("📥 Downloading: $url")
+        println("📥 Downloading video: $url")
 
         // For direct MP4 files, use simple HTTP download
-        if (url.endsWith(".mp4") || url.endsWith(".webm")) {
-            return downloadDirect(url)
+        if (url.endsWith(".mp4") || url.endsWith(".webm") || url.endsWith(".mkv")) {
+            return downloadDirect(url, "mp4")
         }
 
         // For YouTube and other sites, use yt-dlp
-        return downloadWithYtDlp(url)
+        return downloadWithYtDlp(url, "mp4")
     }
 
-    private fun downloadDirect(url: String): File {
+    fun downloadAudio(url: String, format: String = "mp3"): File {
+        println("🎵 Downloading audio: $url")
+
+        val tempFile = File.createTempFile("audio_", ".$format")
+        if (tempFile.exists()) tempFile.delete()
+
+        val command = listOf(
+            ytDlpPath,
+            "--js-runtimes", jsRuntime,
+            "--no-check-certificates",
+            "--no-warnings",
+            "-x",
+            "--audio-format", format,
+            "--audio-quality", "0",
+            "-o", tempFile.absolutePath,
+            "--force-overwrites",
+            "--newline",
+            url
+        )
+
+        return executeDownload(command, tempFile)
+    }
+
+    private fun downloadDirect(url: String, ext: String): File {
         println("🌐 Direct download: $url")
 
-        val tempFile = File.createTempFile("video_", ".mp4")
+        val tempFile = File.createTempFile("video_", ".$ext")
 
         try {
             val connection = URL(url).openConnection()
@@ -78,8 +157,8 @@ class VideoDownloadService {
         }
     }
 
-    private fun downloadWithYtDlp(url: String): File {
-        val tempFile = File.createTempFile("video_", ".mp4")
+    private fun downloadWithYtDlp(url: String, ext: String): File {
+        val tempFile = File.createTempFile("video_", ".$ext")
         if (tempFile.exists()) tempFile.delete()
 
         val useJsRuntime = url.contains("youtube") || url.contains("youtu.be")
@@ -114,12 +193,10 @@ class VideoDownloadService {
                 .start()
 
             val reader = process.inputStream.bufferedReader()
-            val output = StringBuilder()
 
             reader.useLines { lines ->
                 lines.forEach { line ->
                     println("[yt-dlp] $line")
-                    output.appendLine(line)
                 }
             }
 
