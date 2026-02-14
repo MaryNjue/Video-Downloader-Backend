@@ -82,44 +82,16 @@ class VideoDownloadService {
 
         // OPTION 1: Limit formats to only essential ones
         val formats = root["formats"]
-            ?.asSequence() // Use sequence for better performance
-            ?.filter { it["ext"] != null }
-            ?.filter {
-                val ext = it["ext"].asText()
-                ext in listOf("mp4", "m4a") // Only mp4 video and m4a audio
-            }
-            ?.filter {
-                // Only get specific resolutions (skip 4K, 144p, etc)
-                val res = it["resolution"]?.asText() ?: ""
-                val isAudio = it["vcodec"]?.asText() == "none"
-
-                isAudio || res in listOf("360p", "480p", "720p", "1080p")
-            }
-            ?.sortedBy {
-                // Sort by quality (audio first, then 360p to 1080p)
-                val res = it["resolution"]?.asText() ?: ""
-                when {
-                    res == "audio only" -> 0
-                    res == "360p" -> 1
-                    res == "480p" -> 2
-                    res == "720p" -> 3
-                    res == "1080p" -> 4
-                    else -> 5
-                }
-            }
-            ?.take(5) // MAX 5 formats only
+            ?.take(10)  // Just take first 10 formats, no filtering
             ?.map {
                 FormatResponse(
                     formatId = it["format_id"]?.asText() ?: "unknown",
-                    ext = it["ext"].asText(),
-                    resolution = it["resolution"]?.asText()
-                        ?: it["abr"]?.asText()?.let { "${it}kbps" }
-                        ?: "audio",
+                    ext = it["ext"]?.asText() ?: "mp4",
+                    resolution = it["resolution"]?.asText() ?: it["abr"]?.asText() ?: "unknown",
                     filesize = it["filesize"]?.asLong(),
                     audioOnly = it["vcodec"]?.asText() == "none"
                 )
             }
-            ?.toList() // Convert back to list
             ?: emptyList()
 
         return VideoInfoResponse(
