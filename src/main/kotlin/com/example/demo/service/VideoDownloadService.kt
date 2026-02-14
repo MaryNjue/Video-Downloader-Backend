@@ -69,30 +69,66 @@ class VideoDownloadService {
         val output = process.inputStream.bufferedReader().readText()
         process.waitFor(2, TimeUnit.MINUTES)
 
-        // Debug: print what we got
         println("yt-dlp output length: ${output.length}")
-        println("First 200 chars: ${output.take(200)}")
 
         if (!output.trim().startsWith("{")) {
-            println("ERROR: Invalid JSON response: $output")
-            throw IllegalStateException("Invalid response from yt-dlp: ${output.take(100)}")
+            println("ERROR: Invalid JSON response")
+            throw IllegalStateException("Invalid response from yt-dlp")
         }
 
         val root = objectMapper.readTree(output)
 
-        // OPTION 1: Limit formats to only essential ones
+        // FIX: Get ALL formats without strict filtering
         val formats = root["formats"]
-            ?.take(10)  // Just take first 10 formats, no filtering
+            ?.filter { it["ext"] != null }
+            ?.filter {
+                // Skip storyboards (sb0, sb1, sb2, sb3) - they're just thumbnails
+                val formatId = it["format_id"]?.asText() ?: ""
+                !formatId.startsWith("sb")
+            }
             ?.map {
+                val formatId = it["format_id"]?.asText() ?: "unknown"
+                val ext = it["ext"]?.asText() ?: "mp4"
+                val resolution = it["resolution"]?.asText()
+                val vcodec = it["vcodec"]?.asText() ?: ""
+                val acodec = it["acodec"]?.asText()
+
+                // Audio if no video codec OR has audio bitrate
+                val isAudioOnly = vcodec == "none" || acodec != null
+
                 FormatResponse(
-                    formatId = it["format_id"]?.asText() ?: "unknown",
-                    ext = it["ext"]?.asText() ?: "mp4",
-                    resolution = it["resolution"]?.asText() ?: it["abr"]?.asText() ?: "unknown",
+                    formatId = formatId,
+                    ext = ext,
+                    resolution = if (isAudioOnly) "audio only" else (resolution ?: "unknown"),
                     filesize = it["filesize"]?.asLong(),
-                    audioOnly = it["vcodec"]?.asText() == "none"
+                    audioOnly = isAudioOnly
                 )
             }
+            ?.filter { it.resolution != "unknown" }  // Remove unknown resolutions
+            ?.sortedWith(
+                compareBy(
+                    { it.audioOnly },  // false (video) comes before true (audio)
+                    {
+                        // Sort by resolution quality
+                        when (it.resolution) {
+                            "144p", "256x144" -> 1
+                            "240p", "426x240" -> 2
+                            "360p", "640x360" -> 3
+                            "480p", "854x480" -> 4
+                            "720p", "1280x720" -> 5
+                            "1080p", "1920x1080" -> 6
+                            "1440p", "2560x1440" -> 7
+                            "2160p", "3840x2160" -> 8
+                            else -> if (it.audioOnly) 0 else 9
+                        }
+                    }
+                )
+            )
+            ?.take(8)  // Take top 8 (mix of video + audio)
             ?: emptyList()
+
+        println("✅ Found ${formats.size} formats")
+        formats.forEach { println("  - ${it.formatId}: ${it.resolution} (${it.ext})") }
 
         return VideoInfoResponse(
             title = root["title"]?.asText() ?: "Unknown Title",
@@ -109,12 +145,10 @@ class VideoDownloadService {
     fun download(url: String): File {
         println("📥 Downloading video: $url")
 
-        // For direct MP4 files, use simple HTTP download
         if (url.endsWith(".mp4") || url.endsWith(".webm") || url.endsWith(".mkv")) {
             return downloadDirect(url, "mp4")
         }
 
-        // For YouTube and other sites, use yt-dlp
         return downloadWithYtDlp(url, "mp4")
     }
 
